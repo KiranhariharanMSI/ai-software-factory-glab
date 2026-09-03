@@ -22,6 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path.cwd() / "factory"))
 
+import backend  # noqa: E402
 import config  # noqa: E402
 import notify  # noqa: E402
 import state  # noqa: E402
@@ -37,8 +38,7 @@ if not target:
 
 # --- the rate-limited path ----------------------------------------------------
 if rate_limited:
-    state.gh("issue", "edit", target.split(":")[-1], "--add-label", "factory:rate-limited",
-             check=False)
+    backend.add_label("issue", target.split(":")[-1], "factory:rate-limited", check=False)
     state.comment(
         target,
         "**Factory triage: rate-limited**\n\n"

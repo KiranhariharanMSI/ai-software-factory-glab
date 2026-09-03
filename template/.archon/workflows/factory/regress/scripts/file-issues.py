@@ -27,6 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path.cwd() / "factory"))
 
+import backend  # noqa: E402
 import config  # noqa: E402
 import notify  # noqa: E402
 import state  # noqa: E402
@@ -109,12 +110,7 @@ if not findings:
 
 # --- 4. file, with dedup -------------------------------------------------------
 try:
-    existing = json.loads(
-        state.gh(
-            "issue", "list", "--state", "open", "--label", LABEL,
-            "--limit", "100", "--json", "number,title",
-        ) or "[]"
-    )
+    existing = backend.list_issues(state="open", label=LABEL, limit=100)
 except Exception as e:  # noqa: BLE001
     print(f"FILE_FAILED: could not list existing issues ({e}). Nothing filed.", file=sys.stderr)
     escalate(f"the regression found {len(findings)} problem(s) but could not file them: {e}")
@@ -154,12 +150,7 @@ for f in findings:
     )
 
     try:
-        out = state.gh(
-            "issue", "create", "--title", title, "--body-file", "-",
-            "--label", LABEL, "--label", f"priority:{priority}",
-            stdin=body,
-        )
-        url = (out or "").strip().splitlines()[-1] if out else ""
+        url = backend.create_issue(title, body, [LABEL, f"priority:{priority}"])
         filed.append((url, title))
         print(f"FILED {url} {title}")
     except Exception as e:  # noqa: BLE001

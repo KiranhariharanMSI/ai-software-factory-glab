@@ -43,6 +43,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import backend  # noqa: E402
 import config  # noqa: E402
 import guard  # noqa: E402
 import state  # noqa: E402
@@ -275,16 +276,13 @@ def main(argv: list[str]) -> int:
     # says what the factory believes; `state` and `mergeStateStatus` say what GitHub
     # will actually do, and a PR closed or made conflicting since validation must
     # not be squashed anyway.
-    raw = state.gh(
-        "pr", "view", num, "--json", "state,mergeable,isDraft,baseRefName,mergeStateStatus"
-    )
-    view = json.loads(raw)
+    view = backend.view_pr(num)
     if view["state"] != "OPEN":
         return refuse(f"PR #{num} is {view['state']}")
     if view["isDraft"]:
         # A draft cannot be merged at all. Flip it, because the factory opened it as
         # a draft on purpose and this is the moment that stops being true.
-        state.gh("pr", "ready", num, check=False)
+        backend.ready_pr(num)
         view["isDraft"] = False
     if view["baseRefName"] != config.BASE_BRANCH:
         return refuse(f"PR #{num} targets '{view['baseRefName']}', not main")
@@ -328,17 +326,9 @@ def main(argv: list[str]) -> int:
         "Gates: protected paths, markers, ratchet, mutations, e2e -- all green on re-check.\n"
         "No human read this diff."
     )
-    p = subprocess.run(
-        ["gh", "pr", "merge", num, "--squash", "--subject", title[:68], "--body", body],
-        cwd=str(config.ROOT),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=180,
-    )
-    if p.returncode != 0:
-        return refuse(f"gh pr merge failed -- leaving for a human: {p.stderr.strip()}")
+    rc, err = backend.merge_pr(num, title[:68], body)
+    if rc != 0:
+        return refuse(f"gh pr merge failed -- leaving for a human: {err}")
 
     # Bring the local checkout back in line. Without this the next branch is cut
     # from a main that is one merge behind, and the guard's merge base is a commit

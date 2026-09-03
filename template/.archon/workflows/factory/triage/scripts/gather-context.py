@@ -11,13 +11,13 @@ prompt and a human reads the artifact.
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path.cwd() / "factory"))
 
+import backend  # noqa: E402
 import config  # noqa: E402
 import state  # noqa: E402
 
@@ -56,14 +56,8 @@ if config.DECISIONS_FILE.exists():
 # So the classifier can recognise a duplicate, or an issue an open PR already
 # addresses, instead of queueing the same mechanism twice.
 try:
-    open_issues = json.loads(
-        state.gh("issue", "list", "--state", "open", "--limit", "50",
-                 "--json", "number,title,labels") or "[]"
-    )
-    open_prs = json.loads(
-        state.gh("pr", "list", "--state", "open", "--limit", "30",
-                 "--json", "number,title,body") or "[]"
-    )
+    open_issues = backend.list_issues(state="open", limit=50)
+    open_prs = backend.list_prs(state="open", limit=30)
 except Exception as e:  # noqa: BLE001
     open_issues, open_prs = [], []
     section("IN FLIGHT", f"(could not be read: {e})")
