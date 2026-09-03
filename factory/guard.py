@@ -57,6 +57,27 @@ PROTECTED = [
     # The workflow pack. A node that can rewrite its own workflow can remove the
     # node that checks it.
     ".archon/workflows/factory/**",
+    # This repo is the tool itself, and MISSION.md deliberately scopes most of
+    # template/factory/** as buildable (that IS the backend-abstraction work) --
+    # so this does NOT mirror the blanket "factory/*" protection above. It protects
+    # only the judge/enforcement files themselves: no PR may weaken the thing that
+    # decides whether PRs get accepted, even one that is honestly trying to add a
+    # feature elsewhere in the same runtime.
+    "template/factory/guard.py",
+    "template/factory/gate.py",
+    "template/factory/tripwire.py",
+    "template/factory/watchdog.py",
+    "template/factory/ledger.py",
+    "template/harness/*",
+    "template/harness/**",
+    # Only the workflow GRAPH is protected here, not the scripts a node invokes --
+    # those are ordinary call-site code (open-pr.py, the triage scripts) that this
+    # very PRD requires migrating onto the backend interface. Rewriting node order,
+    # trigger rules or which script a node calls is the thing this must not allow;
+    # what a script does internally is not.
+    "template/.archon/workflows/factory/**/*.yaml",
+    "template/.archon/workflows/factory/**/commands/*.md",
+    "template/.claude/skills/factory-*/**",
     # CI, because a required check the factory can edit is not a required check.
     ".github/**",
     # Secrets. Being unable to EDIT one does not stop a broad `git add` from
@@ -92,7 +113,11 @@ SIZE_EXEMPT = [".factory/runs/*", ".factory/runs/**", "*.lock", "uv.lock", "bun.
 # tests/ does not ship to the running product, so it cannot carry the risk the cap is
 # guarding against, and TOTAL_CAP still bounds the whole diff.
 TEST_PATHS = ["tests/*", "tests/**", "*.test.ts", "*.test.js", "*.spec.ts", "*.spec.js",
-              "**/*.test.ts", "**/*.test.js", "**/*.spec.ts", "**/*.spec.js"]
+              "**/*.test.ts", "**/*.test.js", "**/*.spec.ts", "**/*.spec.js",
+              # This repo's own convention (factory/_selftest.py, factory/_test_watchdog.py,
+              # and the template mirror). `matches()` also checks the bare basename, so
+              # these need no directory prefix to catch either copy.
+              "test_*.py", "*_test.py", "_test_*.py", "_selftest.py"]
 
 
 def git(*args: str) -> tuple[int, str]:
