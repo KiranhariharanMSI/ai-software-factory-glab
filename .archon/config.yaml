@@ -1,0 +1,6 @@
+# Project Archon configuration
+# Pinned because auto-detection was picking up this Claude Code job's own
+# isolation branch (worktree-shiny-discovering-wall) instead of the repo's
+# real default branch, which does not exist on origin.
+worktree:
+  baseBranch: main

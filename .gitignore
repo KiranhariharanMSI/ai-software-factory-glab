@@ -2,3 +2,54 @@ __pycache__/
 *.pyc
 .venv/
 tmp/
+
+# Appended to your .gitignore by `factory init`.
+
+# THE FACTORY'S OWN BYTECODE. Every factory script is Python, and running one inside a
+# worktree writes `factory/__pycache__/*.pyc` -- inside `factory/`, which is on the
+# PROTECTED list. A builder's `git add -A` then sweeps them in and the guard blocks the
+# change for touching a protected path, which is exactly right and completely useless:
+# the lap dies with five .pyc files named as the violation and the actual work sitting
+# beside them, correct and unmergeable.
+__pycache__/
+*.pyc
+*.pyo
+
+# factory: runtime state, never committed
+.factory/runs/
+.factory/ledger.jsonl
+.factory/locks-runtime/
+.factory/findings/
+.factory/needs-human.md
+.factory/escalations.log
+.factory/trigger.json
+.factory/deployed.json
+.factory/deploy-history.log
+.factory/STOP
+# The singleton's pid file. Per-machine runtime state: committing it puts one
+# machine's pid in another machine's checkout, where it is at best noise and at
+# worst a number that happens to belong to something else and wedges the loop.
+.factory/loop.pid
+.factory/assumptions/
+.factory/followups/
+
+# What the agent-driven rungs wrote THIS run. Evidence for one gate, not source.
+# Committing them would let a stale result from a build that no longer exists be
+# read as the current answer.
+harness/.results/
+.factory/holdout/.results/
+
+# Secrets. THE PRE-FLIGHT REFUSES TO START while any of these is unignored, and that
+# refusal is the point: an empty `git check-ignore` result means the next run that
+# commits publishes your key. On a public repo that is publication, not a mistake you
+# can take back -- rotating afterwards is the cleanup, not the fix.
+#
+# Being unable to EDIT a protected file does not stop a broad `git add` from
+# committing one that appears for the first time next month, which is why this list
+# is separate from the protected list and checked before every committing workflow.
+.env
+.env.*
+!.env.example
+*.pem
+secrets.json
+credentials.json
