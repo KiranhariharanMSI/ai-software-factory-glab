@@ -28,14 +28,13 @@ OPERATIONS = (
     "ready_pr", "merge_pr", "repo_view",
 )
 
-_IMPLS = {"github": "backend_github", "local": "backend_local"}
+_IMPLS = {"github": "backend_github", "gitlab": "backend_gitlab", "local": "backend_local"}
 
 
 def resolve(name: str):
     if name not in _IMPLS:
         raise BackendError(
-            f"unknown backend {name!r}; valid values: {sorted(_IMPLS)}. A gitlab "
-            f"backend is a separate issue."
+            f"unknown backend {name!r}; valid values: {sorted(_IMPLS)}."
         )
     import importlib
 

@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import backend  # noqa: E402
 import backend_github  # noqa: E402
+import backend_gitlab  # noqa: E402
 import backend_local  # noqa: E402
 import config  # noqa: E402
 import dispatch  # noqa: E402
@@ -1083,6 +1084,300 @@ def backend_local_checks() -> None:
             setattr(backend, n, fn)
 
 
+def backend_gitlab_checks() -> None:
+    """The `glab` wrapper, exercised against canned GitLab-shaped JSON.
+
+    Offline, like every other check here: `subprocess.run` is stubbed on
+    `backend_gitlab` and every response is a hand-written GitLab payload, never
+    a real `glab` call. THE HONEST LIMIT: these checks assert argv *shape* and
+    normalised *output*, not that `glab` accepts these exact flags -- a
+    wrong-but-plausible flag would still pass. That is the accepted trade (the
+    issue's non-goals rule out network validation in this PR); every flag
+    inferred rather than read off the issue's verified list carries an
+    ASSUMPTIONS line with a CHANGE IF.
+    """
+    saved_ops = {n: getattr(backend, n) for n in backend.OPERATIONS}
+    saved_sub = backend_gitlab.subprocess
+    calls: list[list[str]] = []
+
+    class _Canned:
+        """Records every argv; returns whatever `queue` holds next, or `[]`."""
+
+        def __init__(self) -> None:
+            self.queue: list[str] = []
+
+        def run(self, argv, *a, **kw):
+            calls.append(list(argv))
+            out = self.queue.pop(0) if self.queue else "[]"
+            return types.SimpleNamespace(returncode=0, stdout=out, stderr="")
+
+    stub = _Canned()
+
+    try:
+        for n in backend.OPERATIONS:
+            setattr(backend, n, getattr(backend_gitlab, n))
+        backend_gitlab.subprocess = stub
+
+        # (a) the whole contract is implemented, and resolve() is unaffected for
+        # the other two backends.
+        check("every backend.OPERATIONS name is callable on backend_gitlab",
+              all(callable(getattr(backend_gitlab, n, None)) for n in backend.OPERATIONS))
+        check("backend.resolve('gitlab') returns backend_gitlab",
+              backend.resolve("gitlab") is backend_gitlab)
+        check("backend.resolve('github') still returns backend_github",
+              backend.resolve("github") is backend_github)
+        check("backend.resolve('local') still returns backend_local",
+              backend.resolve("local") is backend_local)
+
+        # (b) field/enum mapping -- naive-shim failure class 1.
+        canned_issue = {
+            "iid": 12,
+            "title": "Title",
+            "state": "opened",
+            "labels": ["factory:accepted"],
+            "author": {"username": "someone"},
+            "description": "body",
+            "web_url": "https://gitlab.example.com/g/p/-/issues/12",
+            "created_at": "2026-09-03T10:00:00.000Z",
+        }
+        stub.queue = [json.dumps(canned_issue)]
+        v = backend.view_issue("12")
+        check("view_issue: number is an int, from iid", v["number"] == 12)
+        check("view_issue: opened -> OPEN", v["state"] == "OPEN")
+        check("view_issue: labels are name-dicts", v["labels"] == [{"name": "factory:accepted"}])
+        check("view_issue: author.login, from username", v["author"] == {"login": "someone"})
+        check("view_issue: body, from description", v["body"] == "body")
+
+        stub.queue = [json.dumps({**canned_issue, "state": "closed"})]
+        check("issue state closed -> CLOSED", backend.view_issue("12")["state"] == "CLOSED")
+
+        canned_mr_base = {
+            "iid": 1, "title": "t", "state": "merged", "labels": [],
+            "author": {"username": "x"}, "description": "", "web_url": "u",
+            "created_at": "", "source_branch": "h", "target_branch": "main",
+            "changes_count": "3", "merge_status": "can_be_merged",
+        }
+        stub.queue = [json.dumps(canned_mr_base)]
+        check("MR state merged -> MERGED", backend.view_pr("1")["state"] == "MERGED")
+
+        stub.queue = [json.dumps({**canned_issue, "state": "some-unmapped-thing"})]
+        v_unmapped = backend.view_issue("12")
+        check("an unrecognised state does not fall through to OPEN",
+              v_unmapped["state"] != "OPEN",
+              "merge.py merges on state == 'OPEN'; falling through there would "
+              "squash a closed/unknown MR")
+
+        # (c) field minimality, both directions.
+        canned_mr = {
+            **canned_mr_base,
+            "state": "opened",
+            "notes": "chatter that must never reach the judge",
+        }
+        stub.queue = [json.dumps(canned_mr)]
+        pr = backend.view_pr("1")
+        github_pr_keys = {
+            "number", "title", "body", "labels", "state", "url", "author",
+            "headRefName", "baseRefName", "isDraft", "mergeable", "mergeStateStatus",
+        }
+        expected_keys = github_pr_keys | {"additions", "deletions", "changedFiles", "createdAt"}
+        check("view_pr's key set is exactly the GitHub shape plus the three diff fields",
+              set(pr) == expected_keys, f"got {sorted(pr)}")
+        check("description and notes did not leak through",
+              "description" not in pr and "notes" not in pr,
+              "-F json returns the whole object; a passthrough would put the "
+              "coder's chatter in front of the validator")
+
+        # (d) the merge-state table, asserted as the DECISION merge.py reaches.
+        def _merge_branch(view: dict) -> str:
+            if view["state"] != "OPEN":
+                return "refused_not_open"
+            if view["isDraft"]:
+                return "would_ready_then_recheck"
+            if view["baseRefName"] != config.BASE_BRANCH:
+                return "refused_wrong_base"
+            if view["mergeable"] != "MERGEABLE":
+                return "refused_mergeable"
+            ms = view.get("mergeStateStatus") or ""
+            if ms == "BLOCKED":
+                return "blocked_branch_protection"
+            if ms == "DIRTY":
+                return "refused_dirty"
+            if ms in ("", "UNKNOWN"):
+                return "refused_unknown"
+            return "would_merge"
+
+        # merge.py checks `mergeable` before `mergeStateStatus` (:289 before
+        # :299-313), so a status mapped to mergeable != MERGEABLE is refused
+        # there, before mergeStateStatus is ever consulted -- correctly, since
+        # both "conflict" and "unchecked" really are not mergeable yet. The
+        # one case that MUST NOT be caught by the mergeable check is
+        # blocked_status: it is mergeable (no conflict) but blocked, and that
+        # is exactly the pair the branch-protection report at :300-310 needs.
+        for status, want_branch in (
+            ("can_be_merged", "would_merge"),
+            ("conflict", "refused_mergeable"),
+            ("blocked_status", "blocked_branch_protection"),
+            ("unchecked", "refused_mergeable"),
+        ):
+            mr = {**canned_mr, "detailed_merge_status": status, "merge_status": status,
+                  "target_branch": config.BASE_BRANCH, "draft": False}
+            stub.queue = [json.dumps(mr)]
+            view = backend.view_pr("1")
+            got = _merge_branch(view)
+            check(f"detailed_merge_status={status!r} reaches merge.py branch {want_branch!r}",
+                  got == want_branch, f"got {got!r} (mergeable={view['mergeable']!r} "
+                  f"mergeStateStatus={view['mergeStateStatus']!r})")
+
+        # blocked-but-conflict-free is the whole point: MERGEABLE and BLOCKED at
+        # once, and it must NOT be refused at the `mergeable` check.
+        stub.queue = [json.dumps({**canned_mr, "detailed_merge_status": "blocked_status",
+                                   "target_branch": config.BASE_BRANCH, "draft": False})]
+        blocked_view = backend.view_pr("1")
+        check("blocked_status is MEGEABLE/BLOCKED, the branch-protection pair",
+              (blocked_view["mergeable"], blocked_view["mergeStateStatus"])
+              == ("MERGEABLE", "BLOCKED"))
+
+        stub.queue = [json.dumps({**canned_mr, "draft": True})]
+        check("draft: true -> isDraft is True", backend.view_pr("1")["isDraft"] is True)
+
+        # (e) MR-number extraction -- naive-shim failure class 2.
+        canned_list_mr = {
+            **canned_mr_base, "iid": 7, "state": "opened", "draft": False,
+            "source_branch": "factory/implement-issue-6",
+            "web_url": "https://gitlab.example.com/g/p/-/merge_requests/7",
+        }
+        stub.queue = [json.dumps([canned_list_mr])]
+        found = backend.list_prs(head="factory/implement-issue-6")
+        check("list_prs: number comes from iid, not the URL", found[0]["number"] == 7)
+        check("list_prs: url is web_url, untouched",
+              found[0]["url"] == canned_list_mr["web_url"])
+        check("list_prs argv carries --source-branch and the branch name",
+              "--source-branch" in calls[-1] and "factory/implement-issue-6" in calls[-1])
+
+        open_pr_src = (Path(__file__).resolve().parent.parent / ".archon" / "workflows"
+                       / "factory" / "implement" / "scripts" / "open-pr.py").read_text(encoding="utf-8")
+        check("open-pr.py contains no /pull/ or merge_requests URL shape",
+              "/pull/" not in open_pr_src and "merge_requests" not in open_pr_src,
+              "this is the extraction the naive shim got wrong -- it must be nowhere "
+              "in a call site")
+        check("open-pr.py reads the number back through list_prs",
+              "backend.list_prs(head=head, limit=1)" in open_pr_src)
+
+        # (f) the seven verified incompatibilities, as argv assertions.
+        calls.clear()
+        stub.queue = ["url"]
+        backend.create_issue("t", "b", ["l"])
+        stub.queue = []
+        backend.close_issue("1", "not planned")
+        backend.reopen_issue("1")
+        backend.edit_labels("issue", "1", add=["a"], remove=["r"])
+        backend.create_label("x", "ededed", "d")
+        stub.queue = ["url"]
+        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".md") as f:
+            f.write("body")
+            body_path = f.name
+        try:
+            backend.create_pr("main", "head", "t", body_path)
+        finally:
+            os.unlink(body_path)
+        rc_m, err_m = backend.merge_pr("1", "subject", "body")
+
+        check("no argv contains --json (glab has no field-selection flag)",
+              not any("--json" in c for c in calls))
+        edit_call = next(c for c in calls if c[1:3] == ["issue", "update"])
+        check("edit_labels uses update, never edit, with --label/--unlabel",
+              "--label" in edit_call and "--unlabel" in edit_call
+              and "edit" not in edit_call)
+        close_call = next(c for c in calls if c[1:3] == ["issue", "close"])
+        check("close_issue drops --reason rather than faking it",
+              "--reason" not in close_call)
+        merge_call = next(c for c in calls if c[1:3] == ["mr", "merge"])
+        check("merge_pr's argv has --squash, --auto-merge=false, --yes, no --subject/--body",
+              "--squash" in merge_call and "--auto-merge=false" in merge_call
+              and "--yes" in merge_call and "--subject" not in merge_call
+              and "--body" not in merge_call)
+        label_call = next(c for c in calls if c[1:3] == ["label", "create"])
+        check("create_label prepends # to a bare hex colour", "#ededed" in label_call)
+        mutating = [c for c in calls if c[1:3] != ["mr", "merge"]]
+        check("every mutating command (other than merge_pr, checked above) carries --yes",
+              all("--yes" in c for c in mutating), f"missing on: {mutating}")
+
+        # (g) merge_pr never raises and returns (int, str).
+        check("merge_pr returns an (int, str) tuple, never raises",
+              isinstance(rc_m, int) and isinstance(err_m, str))
+
+        # (h) edit_labels with nothing to do issues no command at all.
+        before = len(calls)
+        backend.edit_labels("issue", "1")
+        check("edit_labels with no add/remove issues no command",
+              len(calls) == before)
+
+        # (i) retry discipline, mirroring gh_retry_checks.
+        import io as _io
+        real_run, real_sleep = backend_gitlab.subprocess, backend_gitlab.time.sleep
+        backend_gitlab.time.sleep = lambda _s: None
+        buf = _io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            class P:
+                def __init__(self, rc, err):
+                    self.returncode, self.stdout, self.stderr = rc, ("OK" if rc == 0 else ""), err
+
+            def script(seq):
+                state_ = {"n": 0}
+                def fake(argv, *a, **kw):
+                    i = state_["n"]; state_["n"] += 1
+                    rc, err = seq[min(i, len(seq) - 1)]
+                    return P(rc, err)
+                fake.state = state_
+                return fake
+
+            f1 = script([(1, "HTTP 503: Service Unavailable"), (0, "")])
+            backend_gitlab.subprocess = types.SimpleNamespace(run=f1)
+            out = backend_gitlab._glab("issue", "list")
+            check("a transient 503 is retried and recovers in 2 attempts",
+                  out == "OK" and f1.state["n"] == 2)
+
+            f2 = script([(1, "HTTP 503: Service Unavailable")])
+            backend_gitlab.subprocess = types.SimpleNamespace(run=f2)
+            raised = False
+            try:
+                backend_gitlab._glab("issue", "list")
+            except backend.BackendError:
+                raised = True
+            check("a persistent 503 raises BackendError after exactly 3 attempts",
+                  raised and f2.state["n"] == 3)
+
+            for label, err in (("a 404", "HTTP 404: Not Found"),
+                               ("a merge refusal", "This merge request cannot be merged")):
+                f3 = script([(1, err)])
+                backend_gitlab.subprocess = types.SimpleNamespace(run=f3)
+                raised = False
+                try:
+                    backend_gitlab._glab("mr", "view", "1")
+                except backend.BackendError:
+                    raised = True
+                check(label + " is an answer and is NOT retried",
+                      raised and f3.state["n"] == 1)
+        check("the recovering retry announces itself on stderr as GLAB_RETRY",
+              "GLAB_RETRY" in buf.getvalue())
+        check("backend_gitlab shares backend_github's transient list, not a copy",
+              backend_gitlab._TRANSIENT is backend_github._TRANSIENT,
+              "a second copy of that list is the copy that goes stale")
+        backend_gitlab.subprocess, backend_gitlab.time.sleep = real_run, real_sleep
+
+        # (j) the call sites do not know which backend is active.
+        stub.queue = [json.dumps(canned_issue)]
+        fetched = state.fetch("gh:issue:12")
+        check("state.fetch() through the rebound gitlab backend gets the same labels",
+              fetched["_labels"] == ["factory:accepted"])
+        check("state.fetch() through the rebound gitlab backend gets the same _state",
+              fetched["_state"] == "accepted")
+    finally:
+        backend_gitlab.subprocess = saved_sub
+        for n, fn in saved_ops.items():
+            setattr(backend, n, fn)
+
+
 def backend_isolation_checks() -> None:
     """MISSION hard invariant 2: every VCS operation goes through backend.py.
 
@@ -1092,7 +1387,7 @@ def backend_isolation_checks() -> None:
     """
     here = Path(__file__).resolve().parent
     roots = [here, here.parent / ".archon" / "workflows" / "factory"]
-    allow = {"backend_github.py", "doctor.py", "_selftest.py"}
+    allow = {"backend_github.py", "backend_gitlab.py", "doctor.py", "_selftest.py"}
     literals = ('["gh"', "['gh'", '["glab"', "['glab'")
 
     direct, escape_hatch = [], []
@@ -1123,10 +1418,12 @@ def backend_isolation_checks() -> None:
           all(callable(getattr(backend, n, None)) for n in backend.OPERATIONS))
 
     try:
-        backend.resolve("gitlab")
+        backend.resolve("bitbucket")
         check("an unknown backend is refused", False)
     except backend.BackendError as e:
         check("an unknown backend is refused", "github" in str(e))
+    check("backend.resolve('gitlab') returns backend_gitlab",
+          backend.resolve("gitlab") is backend_gitlab)
 
     check("the default is github and it is env-overridable",
           config.BACKEND == "github" or "FACTORY_BACKEND" in os.environ)
@@ -1468,6 +1765,7 @@ def main() -> int:
     gh_retry_checks()
     backend_isolation_checks()
     backend_local_checks()
+    backend_gitlab_checks()
 
     if FAILURES:
         if not quiet:

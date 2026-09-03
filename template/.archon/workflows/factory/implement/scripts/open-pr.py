@@ -128,10 +128,16 @@ if url is None:
     pr_number, url = str(found[0]["number"]), found[0]["url"]
     note(f"PR_EXISTS #{pr_number} for {head} -- reusing it")
 else:
-    m = re.search(r"/pull/(\d+)", url)
-    if not m:
-        die(f"could not read the PR number back from {url!r}")
-    pr_number = m.group(1)
+    # THE URL SHAPE IS THE HOST'S BUSINESS, NOT THIS SCRIPT'S. This used to read the
+    # number back with a GitHub-specific URL pattern -- a call site that knew one
+    # host's URL vocabulary, which MISSION invariant 2 forbids. Other hosts shape a
+    # PR/MR URL differently, and the local backend's URL isn't host-shaped at all, so
+    # that pattern was already wrong for one shipped backend and would be wrong for
+    # more. `list_prs` returns a number every backend has already normalised.
+    found = backend.list_prs(head=head, limit=1)
+    if not found:
+        die(f"the PR was created at {url!r} but no PR could be found for head {head}")
+    pr_number = str(found[0]["number"])
     note(f"PR_OPENED #{pr_number} {url}")
 
 # --- read the body back -------------------------------------------------------

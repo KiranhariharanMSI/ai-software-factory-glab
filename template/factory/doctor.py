@@ -143,6 +143,19 @@ def main(argv: list[str]) -> int:
               "not applicable -- backend: local has no account to authenticate")
         r.add(OK, "origin remote",
               "not applicable -- backend: local keeps state in files, not on a host")
+    elif config.BACKEND == "gitlab":
+        if shutil.which("glab"):
+            p = subprocess.run(["glab", "auth", "status"], capture_output=True, text=True, timeout=60)
+            r.add(OK if p.returncode == 0 else FAIL, "glab authenticated",
+                  "" if p.returncode == 0 else "run `glab auth login`", 1)
+        else:
+            r.add(FAIL, "glab", "not on PATH -- the state machine, the gate and the merge all use it", 1)
+
+        rc, remote = git("remote", "get-url", "origin")
+        if rc == 0 and "github.com" in remote:
+            r.add(WARN, "origin remote", f"{remote} -- backend: gitlab is configured but origin is a github.com remote")
+        else:
+            r.add(OK if rc == 0 else FAIL, "origin remote", remote if rc == 0 else "none -- labels are the state machine", 1)
     else:
         if shutil.which("gh"):
             rc, _ = 0, ""
