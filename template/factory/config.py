@@ -351,6 +351,11 @@ DECISIONS_FILE = SHARED / ".factory/decisions.md"
 ASSUMPTIONS_DIR = SHARED / ".factory/assumptions"
 TRIGGER_FILE = SHARED / ".factory/trigger.json"
 
+# The local backend's store: issues, PRs and the label registry as files. SHARED,
+# not ROOT, for the reason in _shared_root() -- these are runtime state, and state
+# written relative to a worktree is deleted with that worktree when the lap ends.
+LOCAL_DIR = SHARED / _env("FACTORY_LOCAL_DIR", ".factory/local")
+
 # --- deployment ---------------------------------------------------------------
 # THE LOOP IS NOT CLOSED UNTIL A STRANGER CAN SEE THE CHANGE. If merging does not
 # put code in front of a user, you built a PR generator with extra steps.
@@ -432,7 +437,8 @@ NOTIFY_CMD = _env("FACTORY_NOTIFY_CMD", "bash .factory/notify.sh")
 
 # --- state --------------------------------------------------------------------
 # One backend is active per installed factory (MISSION hard invariant 1). `github`
-# is the only value implemented today; see backend.py for the resolver.
+# and `local` are implemented today; `gitlab` is not yet. See backend.py for the
+# resolver.
 BACKEND = _env("FACTORY_BACKEND", "github")
 LABEL_PREFIX = "factory:"
 PRIORITIES = ["critical", "high", "medium", "low"]

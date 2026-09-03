@@ -124,16 +124,36 @@ def main(argv: list[str]) -> int:
     else:
         r.add(FAIL, "archon", f"{config.ARCHON_BIN} not on PATH -- run `factory init`", 1)
 
-    if shutil.which("gh"):
-        rc, _ = 0, ""
-        p = subprocess.run(["gh", "auth", "status"], capture_output=True, text=True, timeout=60)
-        r.add(OK if p.returncode == 0 else FAIL, "gh authenticated",
-              "" if p.returncode == 0 else "run `gh auth login`", 1)
-    else:
-        r.add(FAIL, "gh", "not on PATH -- the state machine, the gate and the merge all use it", 1)
+    try:
+        import backend                       # resolves config.BACKEND on import
+        r.add(OK, "backend", backend.ACTIVE)
+        if config.BACKEND == "local":
+            try:
+                r.add(OK, "local store",
+                      f"{len(backend.list_issues(state='all'))} issues, "
+                      f"{len(backend.list_prs(state='all'))} prs, "
+                      f"{len(backend.list_labels())} labels in {config.LOCAL_DIR}")
+            except backend.BackendError as e:
+                r.add(WARN, "local store", f"unreadable: {e}")
+    except Exception as e:                    # BackendError, ImportError, anything
+        r.add(FAIL, "backend", f"unresolvable: {config.BACKEND!r} ({e})", 1)
 
-    rc, remote = git("remote", "get-url", "origin")
-    r.add(OK if rc == 0 else FAIL, "origin remote", remote if rc == 0 else "none -- labels are the state machine", 1)
+    if config.BACKEND == "local":
+        r.add(OK, "gh authenticated",
+              "not applicable -- backend: local has no account to authenticate")
+        r.add(OK, "origin remote",
+              "not applicable -- backend: local keeps state in files, not on a host")
+    else:
+        if shutil.which("gh"):
+            rc, _ = 0, ""
+            p = subprocess.run(["gh", "auth", "status"], capture_output=True, text=True, timeout=60)
+            r.add(OK if p.returncode == 0 else FAIL, "gh authenticated",
+                  "" if p.returncode == 0 else "run `gh auth login`", 1)
+        else:
+            r.add(FAIL, "gh", "not on PATH -- the state machine, the gate and the merge all use it", 1)
+
+        rc, remote = git("remote", "get-url", "origin")
+        r.add(OK if rc == 0 else FAIL, "origin remote", remote if rc == 0 else "none -- labels are the state machine", 1)
 
     # --- the guidance layer --------------------------------------------------
     for name in ("MISSION.md", "FACTORY_RULES.md"):
