@@ -4,7 +4,7 @@
   Owner: humans only. This file is on the protected list; the factory cannot edit it.
 -->
 
-**Derived from:** conversation with the repo owner, 2026-09-03 (no separate PRD)
+**Derived from:** `PRD.md` (this repo)
 **Last reconciled with it:** 2026-09-03
 
 ## What ai-software-factory-glab is
