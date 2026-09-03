@@ -436,9 +436,9 @@ TASK_NAME = _env("FACTORY_TASK_NAME", f"factory-{ROOT.name}")
 NOTIFY_CMD = _env("FACTORY_NOTIFY_CMD", "bash .factory/notify.sh")
 
 # --- state --------------------------------------------------------------------
-# One backend is active per installed factory (MISSION hard invariant 1). `github`
-# and `local` are implemented today; `gitlab` is not yet. See backend.py for the
-# resolver.
+# One backend is active per installed factory (MISSION hard invariant 1). `github`,
+# `gitlab` and `local` are all implemented; exactly one is active at a time. See
+# backend.py for the resolver.
 BACKEND = _env("FACTORY_BACKEND", "github")
 LABEL_PREFIX = "factory:"
 PRIORITIES = ["critical", "high", "medium", "low"]
