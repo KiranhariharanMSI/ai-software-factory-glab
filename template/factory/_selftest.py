@@ -29,6 +29,8 @@ from pathlib import Path
 # succeed and every assertion about the effect comes back false.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import backend  # noqa: E402
+import backend_github  # noqa: E402
 import config  # noqa: E402
 import dispatch  # noqa: E402
 import gate  # noqa: E402
@@ -375,9 +377,13 @@ def enforcement_checks() -> None:
     attempted. No network, no GitHub.
     """
     original_fetch = state.fetch
-    original_gh = state.gh
+    original_edit_labels, original_close_issue, original_reopen_issue = (
+        backend.edit_labels, backend.close_issue, backend.reopen_issue
+    )
     writes: list = []
-    state.gh = lambda *a, **k: writes.append(a) or ""
+    backend.edit_labels = lambda *a, **k: writes.append(("edit_labels", a, k))
+    backend.close_issue = lambda *a, **k: writes.append(("close_issue", a, k))
+    backend.reopen_issue = lambda *a, **k: writes.append(("reopen_issue", a, k))
     try:
         def at(current_state: str):
             state.fetch = lambda t: {
@@ -472,7 +478,9 @@ def enforcement_checks() -> None:
               "the labels ARE the state, so a correct state with no label is unreadable")
     finally:
         state.fetch = original_fetch
-        state.gh = original_gh
+        backend.edit_labels, backend.close_issue, backend.reopen_issue = (
+            original_edit_labels, original_close_issue, original_reopen_issue
+        )
 
     src = (Path(__file__).resolve().parent / "state.py").read_text(encoding="utf-8")
     check("the check is inside set_state, not in a wrapper",
@@ -934,6 +942,69 @@ def floor_reader_agreement_checks() -> None:
 # aimed at the rejections, not at the happy path: a validator that accepts
 # everything passes a happy-path test perfectly.
 
+def backend_isolation_checks() -> None:
+    """MISSION hard invariant 2: every VCS operation goes through backend.py.
+
+    Scans two explicit roots -- this factory directory and the installed workflow
+    scripts -- rather than the whole repo tree: `_selftest.py` ships into downstream
+    repos, where a wider scan would fail on the user's own venv or vendored code.
+    """
+    here = Path(__file__).resolve().parent
+    roots = [here, here.parent / ".archon" / "workflows" / "factory"]
+    allow = {"backend_github.py", "doctor.py", "_selftest.py"}
+    literals = ('["gh"', "['gh'", '["glab"', "['glab'")
+
+    direct, escape_hatch = [], []
+    for root in roots:
+        if not root.exists():
+            continue
+        for p in root.rglob("*.py"):
+            src = p.read_text(encoding="utf-8", errors="replace")
+            if p.name not in allow and any(t in src for t in literals):
+                direct.append(str(p))
+            # Built from parts so this scanner's own source does not trip its own
+            # check -- see Task 12's whole-tree sweep, which has no allowlist.
+            removed = "state" + "." + "gh"
+            if p.name != "_selftest.py" and (removed in src or "backend.raw" in src):
+                escape_hatch.append(str(p))
+    check("no script shells out to gh/glab outside the backend", not direct,
+          "found in: " + ", ".join(direct))
+    check("no caller uses a removed escape hatch", not escape_hatch,
+          "found in: " + ", ".join(escape_hatch))
+
+    state_src = (here / "state.py").read_text(encoding="utf-8")
+    check("state.py owns no subprocess", "import subprocess" not in state_src,
+          "a future edit that reaches for subprocess in state.py has reintroduced "
+          "the coupling")
+
+    check("the contract lists exactly 18 operations", len(backend.OPERATIONS) == 18)
+    check("every operation in the contract is bound and callable",
+          all(callable(getattr(backend, n, None)) for n in backend.OPERATIONS))
+
+    try:
+        backend.resolve("gitlab")
+        check("an unknown backend is refused", False)
+    except backend.BackendError as e:
+        check("an unknown backend is refused", "github" in str(e))
+
+    check("the default is github and it is env-overridable",
+          config.BACKEND == "github" or "FACTORY_BACKEND" in os.environ)
+    check("summary() reports the backend", "backend" in config.summary())
+    check("backend.ACTIVE names the resolved implementation",
+          backend.ACTIVE == config.BACKEND,
+          "any node or test can print it without importing the impl")
+
+    try:
+        backend_github._json("{not json")
+        check("a malformed response is a BackendError, not a JSONDecodeError", False)
+    except backend.BackendError:
+        check("a malformed response is a BackendError, not a JSONDecodeError", True)
+    check("the stop button's two fail-closed clauses are still there",
+          state_src.count("json.JSONDecodeError") == 2,
+          "the stop button fails open -- an unreadable stop state would read as "
+          "'carry on'")
+
+
 def gh_retry_checks() -> None:
     """A blip is retried. An answer is not.
 
@@ -949,8 +1020,8 @@ def gh_retry_checks() -> None:
     rejected.
     """
     calls = {"n": 0}
-    real_run, real_sleep = state.subprocess.run, state.time.sleep
-    state.time.sleep = lambda _s: None
+    real_run, real_sleep = backend_github.subprocess.run, backend_github.time.sleep
+    backend_github.time.sleep = lambda _s: None
     # The retry says so out loud, which is right in production and noise here --
     # `doctor` runs this file, and a GH_RETRY line in a health report reads as a
     # real upstream problem rather than a test exercising one.
@@ -972,17 +1043,17 @@ def gh_retry_checks() -> None:
 
     try:
         calls["n"] = 0
-        state.subprocess.run = script([(1, "HTTP 503: Service Unavailable"), (0, "")])
-        out = state.gh("issue", "list")
+        backend_github.subprocess.run = script([(1, "HTTP 503: Service Unavailable"), (0, "")])
+        out = backend_github._gh("issue", "list")
         check("a transient 503 is retried and recovers", out == "OK" and calls["n"] == 2,
               "returned " + repr(out) + " after " + str(calls["n"]) + " attempts")
 
         calls["n"] = 0
-        state.subprocess.run = script([(1, "HTTP 503: Service Unavailable")])
+        backend_github.subprocess.run = script([(1, "HTTP 503: Service Unavailable")])
         raised = False
         try:
-            state.gh("issue", "list")
-        except state.GhError:
+            backend_github._gh("issue", "list")
+        except backend.BackendError:
             raised = True
         check("a 503 that never clears still fails, after every attempt",
               raised and calls["n"] == 3, "raised=" + str(raised) + " attempts=" + str(calls["n"]))
@@ -990,11 +1061,11 @@ def gh_retry_checks() -> None:
         for label, err in (("a 404", "HTTP 404: Not Found"),
                            ("a merge refusal", "Pull request is not mergeable")):
             calls["n"] = 0
-            state.subprocess.run = script([(1, err)])
+            backend_github.subprocess.run = script([(1, err)])
             raised = False
             try:
-                state.gh("pr", "view", "1")
-            except state.GhError:
+                backend_github._gh("pr", "view", "1")
+            except backend.BackendError:
                 raised = True
             check(label + " is an answer and is NOT retried",
                   raised and calls["n"] == 1,
@@ -1002,7 +1073,7 @@ def gh_retry_checks() -> None:
                   "question three times and reports the same thing, slower")
     finally:
         _quiet.__exit__(None, None, None)
-        state.subprocess.run, state.time.sleep = real_run, real_sleep
+        backend_github.subprocess.run, backend_github.time.sleep = real_run, real_sleep
 
 
 def teardown_frees_the_port_checks() -> None:
@@ -1254,6 +1325,7 @@ def main() -> int:
     argv_quoting_checks()
     teardown_frees_the_port_checks()
     gh_retry_checks()
+    backend_isolation_checks()
 
     if FAILURES:
         if not quiet:

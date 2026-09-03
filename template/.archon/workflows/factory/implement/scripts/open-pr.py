@@ -20,7 +20,6 @@ TWO THINGS ARE ASSERTED RATHER THAN ASSUMED, and both have bitten real factories
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import subprocess
@@ -34,6 +33,7 @@ sys.path.insert(0, str(Path.cwd() / "factory"))
 # be mistaken for this node's value. emit() writes to the real stdout.
 from nodeio import emit, note  # noqa: E402
 
+import backend  # noqa: E402
 import config  # noqa: E402
 import state  # noqa: E402
 
@@ -118,27 +118,16 @@ note(f"PUSHED {head}")
 # A DRAFT on purpose. It says "not ready for a human yet" while the independent
 # validator has it, and the merge flips it. On a repo where someone is watching the
 # PR list, that distinction is the difference between a queue and a pile.
-p = subprocess.run(
-    ["gh", "pr", "create", "--base", base_branch, "--head", head,
-     "--title", title, "--body-file", str(body_file), "--draft"],
-    cwd=str(config.ROOT), capture_output=True, text=True,
-    encoding="utf-8", errors="replace", timeout=300,
-)
-if p.returncode != 0:
+url = backend.create_pr(base_branch, head, title, str(body_file), draft=True)
+if url is None:
     # An existing PR for this head is not a failure -- a re-dispatch after a partial
     # run reaches here legitimately. Find it rather than opening a second one.
-    existing = subprocess.run(
-        ["gh", "pr", "list", "--head", head, "--json", "number,url", "--limit", "1"],
-        cwd=str(config.ROOT), capture_output=True, text=True,
-        encoding="utf-8", errors="replace", timeout=120,
-    )
-    found = json.loads(existing.stdout or "[]") if existing.returncode == 0 else []
+    found = backend.list_prs(head=head, limit=1)
     if not found:
-        die(f"gh pr create failed: {p.stderr.strip()}")
+        die("gh pr create failed and no existing PR was found for this head")
     pr_number, url = str(found[0]["number"]), found[0]["url"]
     note(f"PR_EXISTS #{pr_number} for {head} -- reusing it")
 else:
-    url = (p.stdout or "").strip().splitlines()[-1]
     m = re.search(r"/pull/(\d+)", url)
     if not m:
         die(f"could not read the PR number back from {url!r}")
@@ -146,12 +135,10 @@ else:
     note(f"PR_OPENED #{pr_number} {url}")
 
 # --- read the body back -------------------------------------------------------
-check = subprocess.run(
-    ["gh", "pr", "view", pr_number, "--json", "body"],
-    cwd=str(config.ROOT), capture_output=True, text=True,
-    encoding="utf-8", errors="replace", timeout=120,
-)
-stored = json.loads(check.stdout or "{}").get("body", "") if check.returncode == 0 else ""
+try:
+    stored = backend.view_pr(pr_number).get("body", "")
+except backend.BackendError:
+    stored = ""
 if f"#{number}" not in stored:
     die(
         f"PR #{pr_number} was opened but its body does not contain the issue link. The "

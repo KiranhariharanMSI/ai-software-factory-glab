@@ -431,9 +431,9 @@ TASK_NAME = _env("FACTORY_TASK_NAME", f"factory-{ROOT.name}")
 NOTIFY_CMD = _env("FACTORY_NOTIFY_CMD", "bash .factory/notify.sh")
 
 # --- state --------------------------------------------------------------------
-# `github` wherever an origin remote exists. There is no second backend: two
-# implementations of one state machine is two that drift, and the one nobody runs
-# is always the one that is wrong.
+# One backend is active per installed factory (MISSION hard invariant 1). `github`
+# is the only value implemented today; see backend.py for the resolver.
+BACKEND = _env("FACTORY_BACKEND", "github")
 LABEL_PREFIX = "factory:"
 PRIORITIES = ["critical", "high", "medium", "low"]
 
@@ -443,6 +443,7 @@ def summary() -> str:
     return "\n".join(
         [
             f"root            {ROOT}",
+            f"backend         {BACKEND}",
             f"autonomy        {AUTONOMY}",
             f"validate        {VALIDATE_CMD}",
             f"quick           {VALIDATE_QUICK}",

@@ -13,7 +13,6 @@ Emits {"rate_limited": bool, "reason": str}.
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 from datetime import datetime, timezone
@@ -24,6 +23,7 @@ sys.path.insert(0, str(Path.cwd() / "factory"))
 # nodeio FIRST -- see factory/nodeio.py for the incident that made this a rule.
 from nodeio import emit, note  # noqa: E402
 
+import backend  # noqa: E402
 import config  # noqa: E402
 import state  # noqa: E402
 
@@ -43,8 +43,7 @@ def owner() -> str:
     """The repo owner is exempt. Read it, do not configure it -- a hardcoded name
     is a footgun the moment this template is copied to a second repo."""
     try:
-        url = state.gh("repo", "view", "--json", "owner")
-        return json.loads(url)["owner"]["login"]
+        return backend.repo_view()["owner"]["login"]
     except Exception:  # noqa: BLE001
         return ""
 
@@ -68,16 +67,11 @@ repo_owner = owner()
 # cap is permanent for anyone who ever tripped it.
 today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 try:
-    stale = json.loads(
-        state.gh(
-            "issue", "list", "--state", "open", "--label", "factory:rate-limited",
-            "--limit", "100", "--json", "number,createdAt",
-        ) or "[]"
-    )
+    stale = backend.list_issues(state="open", label="factory:rate-limited", limit=100)
     for it in stale:
         if it["createdAt"][:10] < today:
-            state.gh("issue", "edit", str(it["number"]), "--remove-label",
-                     "factory:rate-limited", check=False)
+            backend.remove_label("issue", str(it["number"]), "factory:rate-limited",
+                                  check=False)
             note(f"UNSTUCK #{it['number']} (created before {today})")
 except Exception:  # noqa: BLE001
     pass
@@ -90,10 +84,7 @@ if author == repo_owner or not author:
 # Open AND closed, so the author's full daily footprint counts rather than only what
 # survived triage.
 try:
-    todays = json.loads(
-        state.gh("issue", "list", "--state", "all", "--limit", "200",
-                 "--json", "number,author,createdAt") or "[]"
-    )
+    todays = backend.list_issues(state="all", limit=200)
 except Exception as e:  # noqa: BLE001
     emit({"rate_limited": False, "reason": f"could not count: {e}"})
     sys.exit(0)

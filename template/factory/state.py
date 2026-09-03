@@ -37,13 +37,12 @@ FOUR THINGS LABELS ARE NOT, all learned the hard way and all handled below:
 from __future__ import annotations
 
 import json
-import subprocess
 import sys
-import time
 from typing import Any
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
 
+import backend  # noqa: E402
 import config  # noqa: E402
 
 # UTF-8 on every stream, unconditionally. Windows defaults stdio to the ANSI
@@ -169,69 +168,9 @@ LABELS = [
 ]
 
 
-class GhError(RuntimeError):
-    pass
-
-
-# Failures that mean "ask again", not "something is wrong". GitHub returns these
-# routinely and they clear in seconds.
-#
-# THE INCIDENT: a single HTTP 503 on `gh issue list` took down one tick, wrote a
-# needs-human entry and sent a notification. The very next tick, sixty seconds
-# later, succeeded. So a thirty-second blip in somebody else's service produced a
-# page and a permanent record that a human had to clear.
-#
-# That is the wrong threshold in the expensive direction. This runs unattended for
-# days; a channel that fires on every upstream hiccup is a channel people mute, and
-# a muted channel is the failure the escalation path exists to prevent.
-#
-# Deliberately NARROW. A 404, a 422, a bad token or a rejected merge are answers,
-# and retrying an answer just asks the same question three times before reporting
-# the same thing.
-_TRANSIENT = (
-    "503", "502", "504", "500",
-    "service unavailable", "bad gateway", "gateway time-out", "timeout",
-    "connection reset", "connection refused", "could not resolve host",
-    "temporarily unavailable", "try again", "eof occurred", "tls handshake",
-)
-
-
-def _is_transient(stderr: str) -> bool:
-    low = stderr.lower()
-    return any(sig in low for sig in _TRANSIENT)
-
-
-def gh(*args: str, check: bool = True, stdin: str | None = None,
-       attempts: int = 3) -> str:
-    last = None
-    for attempt in range(1, attempts + 1):
-        p = subprocess.run(
-            ["gh", *args],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            input=stdin,
-            cwd=str(config.ROOT),
-            timeout=120,
-        )
-        if p.returncode == 0 or not check:
-            return p.stdout
-        last = p
-        if attempt == attempts or not _is_transient(p.stderr or ""):
-            break
-        # Said out loud rather than retried silently. A command that quietly takes
-        # four seconds sometimes is a mystery later; one that says it retried is a
-        # line in the log somebody can correlate with an upstream status page.
-        print(
-            f"GH_RETRY {attempt}/{attempts - 1} after a transient failure: "
-            f"{(p.stderr or '').strip()[:160]}",
-            file=sys.stderr, flush=True,
-        )
-        time.sleep(2 * attempt)
-    raise GhError(
-        f"gh {' '.join(args)} failed ({last.returncode}): {(last.stderr or '').strip()}"
-    )
+# Kept as an alias: main() catches GhError (below), and callers outside this
+# module do too.
+GhError = backend.BackendError
 
 
 def parse_target(target: str) -> tuple[str, str]:
@@ -267,19 +206,11 @@ def _state_from_labels(kind: str, labels: list[str], closed: bool) -> str:
 
 def fetch(target: str) -> dict[str, Any]:
     kind, num = parse_target(target)
-    if kind == "issue":
-        fields = "number,title,body,labels,state,url,author,createdAt"
-        raw = json.loads(gh("issue", "view", num, "--json", fields))
-    else:
-        # HOLDOUT: only the fields the validator needs. No comments, no reviews,
-        # no commit messages -- the coder's chatter must not reach the judge even
-        # by accident, and excluding it at the fetch layer is what makes that
-        # structural rather than a sentence in a prompt.
-        fields = (
-            "number,title,body,labels,state,url,author,headRefName,baseRefName,"
-            "additions,deletions,changedFiles,isDraft,mergeable,mergeStateStatus"
-        )
-        raw = json.loads(gh("pr", "view", num, "--json", fields))
+    # HOLDOUT (for "pr"): only the fields the validator needs. No comments, no
+    # reviews, no commit messages -- the coder's chatter must not reach the judge
+    # even by accident, and excluding it at the fetch layer is what makes that
+    # structural rather than a sentence in a prompt.
+    raw = backend.view_issue(num) if kind == "issue" else backend.view_pr(num)
     raw["_kind"] = kind
     raw["_target"] = target
     raw["_labels"] = _labels(raw)
@@ -314,7 +245,6 @@ def set_state(target: str, new: str, force: bool = False) -> None:
     lookup is worse than any move it might have prevented.
     """
     kind, num = parse_target(target)
-    verb = "issue" if kind == "issue" else "pr"
     current = fetch(target)
 
     old = current["_state"]
@@ -338,20 +268,15 @@ def set_state(target: str, new: str, force: bool = False) -> None:
         and lbl != add
         and lbl in {v for v in LABEL_FOR_STATE.values() if v}
     ]
-    args = ["edit", num]
-    if add:
-        args += ["--add-label", add]
-    for lbl in remove:
-        args += ["--remove-label", lbl]
     if add or remove:
-        gh(verb, *args)
+        backend.edit_labels(kind, num, add=[add] if add else [], remove=remove)
 
     # The disposition also decides whether the item is open. Doing it here, next to
     # the label write, is what stops "rejected" from meaning two different things
     # depending on which node got there first.
     if kind == "issue":
         if new == "rejected" and current.get("state") == "OPEN":
-            gh("issue", "close", num, "--reason", "not planned", check=False)
+            backend.close_issue(num, "not planned")
         elif new == "done" and current.get("state") == "OPEN":
             # CLOSE IT HERE rather than trusting `Fixes #N` in the PR body.
             #
@@ -364,22 +289,21 @@ def set_state(target: str, new: str, force: bool = False) -> None:
             # A step that must happen should not depend on somebody else's markdown
             # parser agreeing with the formatting. `Fixes #N` stays in the body
             # because it makes the PR readable; it is no longer what does the work.
-            gh("issue", "close", num, "--reason", "completed", check=False)
+            backend.close_issue(num, "completed")
         elif new == "accepted" and current.get("state") != "OPEN":
-            gh("issue", "reopen", num, check=False)
+            backend.reopen_issue(num)
 
 
 def set_priority(target: str, priority: str) -> None:
     if priority not in config.PRIORITIES:
         raise SystemExit(f"BAD_PRIORITY: {priority!r}, expected one of {config.PRIORITIES}")
     kind, num = parse_target(target)
-    verb = "issue" if kind == "issue" else "pr"
     current = fetch(target)
-    args = ["edit", num, "--add-label", f"priority:{priority}"]
-    for lbl in current["_labels"]:
-        if lbl.startswith("priority:") and lbl != f"priority:{priority}":
-            args += ["--remove-label", lbl]
-    gh(verb, *args)
+    remove = [
+        lbl for lbl in current["_labels"]
+        if lbl.startswith("priority:") and lbl != f"priority:{priority}"
+    ]
+    backend.edit_labels(kind, num, add=[f"priority:{priority}"], remove=remove)
 
 
 def comment(target: str, body: str) -> None:
@@ -397,14 +321,13 @@ def comment(target: str, body: str) -> None:
     anything. Empty-is-not-pass, applied to output rather than to checks.
     """
     kind, num = parse_target(target)
-    verb = "issue" if kind == "issue" else "pr"
     body = body.strip()
     if not body:
         raise SystemExit("REFUSED: empty comment body. A verdict nobody can read is not a verdict.")
-    gh(verb, "comment", num, "--body-file", "-", stdin=body)
+    backend.comment(kind, num, body)
 
     probe = body.strip().splitlines()[0][:60]
-    recent = gh(verb, "view", num, "--json", "comments", check=False)
+    recent = backend.comment_texts(kind, num)
     if recent and probe and probe not in recent:
         print(
             f"COMMENT_UNVERIFIED: posted to {target} but could not read the first "
@@ -426,9 +349,8 @@ def bump_attempt(target: str) -> int:
     n = current["_attempts"] + 1
     kind, num = parse_target(target)
     label = f"factory:attempt-{n}"
-    gh("label", "create", label, "--color", "ededed", "--description",
-       f"Fix attempt {n} (FACTORY_RULES 8)", check=False)
-    gh("pr" if kind == "pr" else "issue", "edit", num, "--add-label", label)
+    backend.create_label(label, "ededed", f"Fix attempt {n} (FACTORY_RULES 8)")
+    backend.add_label(kind, num, label)
     return n
 
 
@@ -441,11 +363,7 @@ def stop_requested() -> tuple[bool, str]:
         reason = config.STOP_FILE.read_text(encoding="utf-8", errors="replace").strip()
         return True, f"{config.STOP_FILE} present" + (f": {reason.splitlines()[0]}" if reason else "")
     try:
-        out = gh(
-            "issue", "list", "--state", "open", "--label", config.STOP_LABEL,
-            "--limit", "5", "--json", "number,title",
-        )
-        items = json.loads(out or "[]")
+        items = backend.list_issues(state="open", label=config.STOP_LABEL, limit=5)
     except (GhError, json.JSONDecodeError) as e:
         return True, f"could not read the remote stop state ({e}); failing closed"
     if items:
@@ -455,9 +373,7 @@ def stop_requested() -> tuple[bool, str]:
 
 def _list(kind: str, state: str | None = None) -> list[dict]:
     verb = "issue" if kind == "issues" else "pr"
-    fields = "number,title,labels,state,createdAt" + (",headRefName" if verb == "pr" else "")
-    out = gh(verb, "list", "--state", "open", "--limit", "100", "--json", fields)
-    items = json.loads(out or "[]")
+    items = backend.list_issues() if verb == "issue" else backend.list_prs()
     result = []
     for it in items:
         it["_kind"] = verb
@@ -630,9 +546,7 @@ def init_labels(check_only: bool = False) -> int:
         return 2
 
     try:
-        existing = {
-            lbl["name"] for lbl in json.loads(gh("label", "list", "--limit", "300", "--json", "name"))
-        }
+        existing = set(backend.list_labels())
     except (GhError, json.JSONDecodeError) as e:
         print(f"LABELS_UNKNOWN: {e}", file=sys.stderr)
         return 2
@@ -645,7 +559,7 @@ def init_labels(check_only: bool = False) -> int:
         if check_only:
             print(f"  MISSING  {name}")
             continue
-        gh("label", "create", name, "--color", colour, "--description", desc, check=False)
+        backend.create_label(name, colour, desc)
         print(f"  created  {name}")
     if check_only and missing:
         return 1
