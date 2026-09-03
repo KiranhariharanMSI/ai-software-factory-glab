@@ -15,9 +15,11 @@ regression here is reported before the dial is trusted rather than after.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
+import types
 from datetime import datetime, timezone
 import tempfile
 from pathlib import Path
@@ -31,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import backend  # noqa: E402
 import backend_github  # noqa: E402
+import backend_local  # noqa: E402
 import config  # noqa: E402
 import dispatch  # noqa: E402
 import gate  # noqa: E402
@@ -942,6 +945,144 @@ def floor_reader_agreement_checks() -> None:
 # aimed at the rejections, not at the happy path: a validator that accepts
 # everything passes a happy-path test perfectly.
 
+def backend_local_checks() -> None:
+    """The file-backed backend, exercised the way production would run it.
+
+    `backend`'s module globals were bound to `backend_github` at import time
+    (backend.py:47-50 runs at `config.BACKEND`, which is `github` under this
+    harness). Everything below rebinds those globals by hand, the way
+    `backend.resolve()` would if `FACTORY_BACKEND=local` were set -- so a check
+    that calls `state.fetch()` or `state.init_labels()` runs against the local
+    store, not a real `gh`.
+    """
+    saved_dir = config.LOCAL_DIR
+    saved_ops = {n: getattr(backend, n) for n in backend.OPERATIONS}
+    saved_sub = backend_local.subprocess
+    calls: list[list[str]] = []
+
+    class _NoSubprocess:                     # records, never executes
+        def run(self, argv, *a, **kw):
+            calls.append(list(argv))
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            config.LOCAL_DIR = Path(td)
+            # EXACTLY what backend.py:47-50 does in production, done by hand because
+            # `backend` bound github's functions at import time and the harness runs
+            # this suite with no FACTORY_BACKEND set.
+            for n in backend.OPERATIONS:
+                setattr(backend, n, getattr(backend_local, n))
+            backend_local.subprocess = _NoSubprocess()
+
+            # 1. The whole contract is implemented.
+            check("every backend.OPERATIONS name is callable on backend_local",
+                  all(callable(getattr(backend_local, n, None)) for n in backend.OPERATIONS))
+            check("backend.resolve('local') returns backend_local",
+                  backend.resolve("local") is backend_local)
+
+            # 2. A full issue round-trip.
+            backend.create_label("factory:accepted", "0e8a16", "d")
+            backend.create_label("priority:low", "0e8a16", "d")
+            url = backend.create_issue("Title", "Body text", ["factory:accepted"])
+            check("create_issue returns a url string", isinstance(url, str) and url)
+            num = backend.list_issues()[0]["number"]
+            v = backend.view_issue(num)
+            check("view_issue: title/body/state survive the round-trip",
+                  v["title"] == "Title" and v["body"] == "Body text" and v["state"] == "OPEN")
+            check("list_issues finds the created issue",
+                  any(i["number"] == num for i in backend.list_issues()))
+            backend.add_label("issue", num, "priority:low")
+            check("add_label is visible on the next view",
+                  "priority:low" in [lbl["name"] for lbl in backend.view_issue(num)["labels"]])
+            backend.remove_label("issue", num, "priority:low")
+            check("remove_label is visible on the next view",
+                  "priority:low" not in [lbl["name"] for lbl in backend.view_issue(num)["labels"]])
+            backend.comment("issue", num, "a distinctive comment body")
+            check("comment_texts contains the posted comment",
+                  "a distinctive comment body" in backend.comment_texts("issue", num))
+            backend.close_issue(num, "not planned")
+            check("close_issue sets state CLOSED", backend.view_issue(num)["state"] == "CLOSED")
+            backend.reopen_issue(num)
+            check("reopen_issue sets state OPEN", backend.view_issue(num)["state"] == "OPEN")
+
+            # 3. No network was attempted.
+            check("the round-trip made zero subprocess calls", calls == [])
+
+            # 4. The GitHub-shaped field contract.
+            with tempfile.NamedTemporaryFile("w", delete=False, suffix=".md") as f:
+                f.write("PR body")
+                body_path = f.name
+            try:
+                backend.create_pr("main", "feature-1", "PR title", body_path)
+            finally:
+                os.unlink(body_path)
+            pr_num = backend.list_prs()[0]["number"]
+            pr = backend.view_pr(pr_num)
+            check("view_pr carries every GitHub-shaped field merge.py reads",
+                  all(k in pr for k in (
+                      "state", "isDraft", "baseRefName", "headRefName", "mergeable",
+                      "mergeStateStatus", "number", "createdAt", "labels", "url",
+                      "author", "body",
+                  )))
+            check("a fresh PR is OPEN, MERGEABLE, CLEAN",
+                  pr["state"] == "OPEN" and pr["mergeable"] == "MERGEABLE"
+                  and pr["mergeStateStatus"] == "CLEAN")
+
+            # 5. state.fetch() works against it unmodified.
+            fetched = state.fetch(f"gh:issue:{num}")
+            check("state.fetch()'s _labels is a list of strings",
+                  fetched["_labels"] == ["factory:accepted"])
+            check("state.fetch()'s _state matches the label that was set",
+                  fetched["_state"] == "accepted")
+
+            # 6. An unknown label is refused.
+            try:
+                backend_local.add_label("issue", num, "nope:not-registered")
+                check("edit_labels refuses an unregistered label", False)
+            except backend.BackendError:
+                check("edit_labels refuses an unregistered label", True)
+            try:
+                backend_local.add_label("issue", num, "nope:not-registered", check=False)
+                check("check=False swallows the refusal", True)
+            except backend.BackendError:
+                check("check=False swallows the refusal", False)
+
+            # 7. init_labels is idempotent.
+            with open(os.devnull, "w", encoding="utf-8") as _null:
+                with contextlib.redirect_stdout(_null):
+                    state.init_labels()
+            check("init_labels creates exactly the 19-entry vocabulary",
+                  len(backend_local.list_labels()) == len(state.LABELS))
+            with open(os.devnull, "w", encoding="utf-8") as _null:
+                with contextlib.redirect_stdout(_null):
+                    rc_second = state.init_labels()
+            check("a second init_labels is a no-op and does not error",
+                  rc_second == 0 and len(backend_local.list_labels()) == len(state.LABELS))
+
+            # 8. merge_pr.
+            try:
+                backend_local.merge_pr(999999, "subject", "body")
+                check("merge_pr on an unknown PR raises BackendError", False)
+            except backend.BackendError:
+                check("merge_pr on an unknown PR raises BackendError", True)
+            before_calls = len(calls)
+            rc_m, err_m = backend_local.merge_pr(pr_num, "subject", "body")
+            check("merge_pr returns an (int, str) tuple",
+                  isinstance(rc_m, int) and isinstance(err_m, str))
+            check("merge_pr shells out to git merge, not gh",
+                  len(calls) > before_calls and calls[-1][0] == "git" and "merge" in calls[-1])
+
+            # 9. github is unaffected.
+            check("backend.resolve('github') still returns backend_github",
+                  backend.resolve("github").__name__ == "backend_github")
+    finally:
+        config.LOCAL_DIR = saved_dir
+        backend_local.subprocess = saved_sub
+        for n, fn in saved_ops.items():
+            setattr(backend, n, fn)
+
+
 def backend_isolation_checks() -> None:
     """MISSION hard invariant 2: every VCS operation goes through backend.py.
 
@@ -1326,6 +1467,7 @@ def main() -> int:
     teardown_frees_the_port_checks()
     gh_retry_checks()
     backend_isolation_checks()
+    backend_local_checks()
 
     if FAILURES:
         if not quiet:

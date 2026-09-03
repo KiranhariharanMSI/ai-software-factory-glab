@@ -21,6 +21,11 @@ __pycache__/
 .factory/deployed.json
 .factory/deploy-history.log
 .factory/STOP
+# The local backend's store: issues, PRs and the label registry as files. Runtime
+# state, like everything else in this block -- and untracked files count against the
+# guard's 12-file cap (guard.py reads `git status --untracked-files=all`), so a lap
+# that files three issues would otherwise blow the scope cap on its own bookkeeping.
+.factory/local/
 # The singleton's pid file. Per-machine runtime state: committing it puts one
 # machine's pid in another machine's checkout, where it is at best noise and at
 # worst a number that happens to belong to something else and wedges the loop.

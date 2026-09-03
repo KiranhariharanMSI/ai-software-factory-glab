@@ -471,7 +471,8 @@ def cmd_init(args: argparse.Namespace) -> int:
     run(["git", "config", "core.longpaths", "true"], cwd=root)
 
     # --- labels ---------------------------------------------------------------
-    if shutil.which("gh") and rc == 0:
+    backend_name = os.environ.get("FACTORY_BACKEND", "github")
+    if backend_name == "local" or (shutil.which("gh") and rc == 0):
         say()
         step("creating the label vocabulary (these labels ARE the state machine)")
         rc2, out = run([sys.executable, "factory/state.py", "init-labels"], cwd=root, timeout=300)
