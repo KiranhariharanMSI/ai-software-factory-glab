@@ -190,23 +190,29 @@ def create_issue(title, body, labels):
 
 
 def close_issue(num, reason):
-    # glab has no --reason; the reason is dropped, not faked.
-    _glab("issue", "close", num, "--yes", check=False)
+    # glab has no --reason (dropped, not faked) and no --yes on `issue close`.
+    _glab("issue", "close", num, check=False)
 
 
 def reopen_issue(num):
-    _glab("issue", "reopen", num, "--yes", check=False)
+    # `issue reopen` has no --yes either.
+    _glab("issue", "reopen", num, check=False)
 
 
 def edit_labels(kind, num, add=(), remove=(), check=True):
+    # `issue update` has no --yes flag; `mr update` does (and needs it to skip
+    # a confirmation prompt). Verified against `glab <verb> update --help` for
+    # each -- the two commands' flag surfaces genuinely differ here.
     verb = "issue" if kind == "issue" else "mr"
     args = [verb, "update", num]
     for lbl in add:
         args += ["--label", lbl]
     for lbl in remove:
         args += ["--unlabel", lbl]
+    if verb == "mr":
+        args += ["--yes"]
     if add or remove:
-        _glab(*args, "--yes", check=check)
+        _glab(*args, check=check)
 
 
 def add_label(kind, num, *labels, check=True):
@@ -219,9 +225,12 @@ def remove_label(kind, num, *labels, check=True):
 
 def create_label(name, colour, description):
     # The `#` matters -- callers pass bare hex, GitLab wants it prefixed.
+    # `label create` has no --yes flag at all (verified against --help); it
+    # was here as a copy-paste from another verb and made every call fail
+    # with "Unknown flag: --yes", silently swallowed by check=False.
     hexed = colour if colour.startswith("#") else f"#{colour}"
     _glab("label", "create", "--name", name, "--color", hexed,
-          "--description", description, "--yes", check=False)
+          "--description", description, check=False)
 
 
 def list_labels():
@@ -232,8 +241,15 @@ def list_labels():
 def comment(kind, num, body):
     # glab has no --body-file -; the body goes through argv as one string, one
     # process, keeping state.py's "posted in one call" guarantee.
-    verb = "issue" if kind == "issue" else "mr"
-    _glab(verb, "note", num, "--message", body, "--yes")
+    #
+    # `issue note <id> --message` posts directly and has no --yes flag.
+    # `mr note` is a command GROUP on this glab version -- there is no bare
+    # `mr note <id> --message`, it needs the `create` subcommand, and that
+    # subcommand has no --yes either. The two verbs are not parallel here.
+    if kind == "issue":
+        _glab("issue", "note", num, "--message", body)
+    else:
+        _glab("mr", "note", "create", num, "--message", body)
 
 
 def comment_texts(kind, num):

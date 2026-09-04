@@ -1272,6 +1272,12 @@ def backend_gitlab_checks() -> None:
         backend.reopen_issue("1")
         backend.edit_labels("issue", "1", add=["a"], remove=["r"])
         backend.create_label("x", "ededed", "d")
+        # The pr/mr branch of edit_labels and comment() was never exercised by
+        # this suite before -- exactly the gap that let a wrong --yes and a
+        # wrong `mr note` subcommand shape ship unnoticed.
+        backend.edit_labels("pr", "1", add=["a"], remove=["r"])
+        backend.comment("issue", "1", "text")
+        backend.comment("pr", "1", "text")
         stub.queue = ["url"]
         with tempfile.NamedTemporaryFile("w", delete=False, suffix=".md") as f:
             f.write("body")
@@ -1298,9 +1304,38 @@ def backend_gitlab_checks() -> None:
               and "--body" not in merge_call)
         label_call = next(c for c in calls if c[1:3] == ["label", "create"])
         check("create_label prepends # to a bare hex colour", "#ededed" in label_call)
-        mutating = [c for c in calls if c[1:3] != ["mr", "merge"]]
-        check("every mutating command (other than merge_pr, checked above) carries --yes",
-              all("--yes" in c for c in mutating), f"missing on: {mutating}")
+        mr_edit_call = next(c for c in calls if c[:3] == ["glab", "mr", "update"])
+        check("edit_labels(pr, ...) uses mr update with --label/--unlabel and --yes "
+              "(mr update DOES take --yes, unlike issue update)",
+              "--label" in mr_edit_call and "--unlabel" in mr_edit_call
+              and "--yes" in mr_edit_call)
+        issue_note_call = next(c for c in calls if c[:3] == ["glab", "issue", "note"])
+        check("comment(issue, ...) posts via issue note --message directly, no --yes",
+              "--message" in issue_note_call and "--yes" not in issue_note_call)
+        mr_note_call = next(c for c in calls if c[1:4] == ["mr", "note", "create"])
+        check("comment(pr, ...) uses mr note CREATE (a command group on this glab "
+              "version, not a bare `mr note <id>`), no --yes",
+              "--message" in mr_note_call and "--yes" not in mr_note_call)
+        # --yes is NOT uniform across glab verbs -- verified against each
+        # command's own --help, not assumed. `issue create`, `mr create` and
+        # `mr update` have it; `issue close`, `issue reopen`, `issue update`,
+        # `issue note`, `mr note create`, and `label create` do not have the
+        # flag at all, and passing it is a hard "Unknown flag" error that
+        # check=False previously swallowed silently on every single call.
+        needs_yes = [c for c in calls if c[1:3] in
+                     (["issue", "create"], ["mr", "create"], ["mr", "update"])]
+        check("issue create / mr create / mr update carry --yes (glab supports it there)",
+              needs_yes and all("--yes" in c for c in needs_yes),
+              f"missing on: {[c for c in needs_yes if '--yes' not in c]}")
+        no_yes = [c for c in calls if c[1:3] in
+                  (["issue", "close"], ["issue", "reopen"], ["issue", "update"],
+                   ["issue", "note"], ["label", "create"])
+                  or c[1:4] == ["mr", "note", "create"]]
+        check("issue close/reopen/update/note, mr note create, and label create "
+              "carry no --yes (glab has no such flag there; it was a hard "
+              "parse error before)",
+              no_yes and all("--yes" not in c for c in no_yes),
+              f"unexpectedly present on: {[c for c in no_yes if '--yes' in c]}")
 
         # (g) merge_pr never raises and returns (int, str).
         check("merge_pr returns an (int, str) tuple, never raises",
